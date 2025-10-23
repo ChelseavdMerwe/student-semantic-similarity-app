@@ -16,22 +16,150 @@ load_dotenv()
 import json
 import secrets
 import string
+import hashlib
 
 # --- Credentials file (persistent for the app run) ---
 CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), "credentials.json")
 
 def load_credentials() -> Dict[str, Any]:
+    # Read file-backed data (used-state, fallback credentials)
+    file_creds: Dict[str, Any] = {}
     if os.path.exists(CREDENTIALS_PATH):
         try:
             with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                file_creds = json.load(f)
+        except Exception:
+            file_creds = {}
+
+    # Helper to parse student list from secrets (accept list or comma/newline-separated string)
+    def _parse_student_pw_list(raw):
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            return [str(x) for x in raw]
+        # assume string
+        s = str(raw)
+        # split on commas or newlines
+        parts = [p.strip() for p in s.replace('\r', '\n').split('\n') if p.strip()]
+        result = []
+        for part in parts:
+            for sub in part.split(','):
+                if sub.strip():
+                    result.append(sub.strip())
+        return result
+    
+    def _parse_student_map(raw):
+        # Accept either a dict-like object or a JSON string mapping username->password
+        if raw is None:
+            return {}
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items()}
+        try:
+            # try parse as JSON
+            return json.loads(str(raw))
         except Exception:
             return {}
-    return {}
+    
+    def _parse_admin_map(raw):
+        # Accept either a dict-like object or a JSON string mapping admin_username->password
+        if raw is None:
+            return {}
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items()}
+        try:
+            return json.loads(str(raw))
+        except Exception:
+            return {}
+
+    # Detect secrets-managed credentials (Streamlit secrets take precedence)
+    secrets_mode = False
+    admin_pw = None
+    student_pw_list: List[str] = []
+    try:
+        if hasattr(st, "secrets") and st.secrets:
+            # Streamlit secrets is a Mapping-like object
+            if "ADMIN_PASSWORD" in st.secrets:
+                admin_pw = st.secrets.get("ADMIN_PASSWORD")
+                secrets_mode = True
+            if "ADMIN_MAP" in st.secrets:
+                admin_map = _parse_admin_map(st.secrets.get("ADMIN_MAP"))
+                secrets_mode = True
+            else:
+                admin_map = {}
+
+            if "STUDENT_PASSWORDS" in st.secrets:
+                student_pw_list = _parse_student_pw_list(st.secrets.get("STUDENT_PASSWORDS"))
+                secrets_mode = True
+            if "STUDENT_MAP" in st.secrets:
+                student_map = _parse_student_map(st.secrets.get("STUDENT_MAP"))
+                secrets_mode = True
+            else:
+                student_map = {}
+    except Exception:
+        # If accessing st.secrets fails for any reason, fall back to file-backed creds
+        pass
+
+    # Build students structure: prefer secrets, otherwise use file
+    students: List[Dict[str, Any]] = []
+    used_hashes = set(file_creds.get("used_hashes", []))
+
+    if student_pw_list:
+        for pw in student_pw_list:
+            h = hashlib.sha256(pw.encode("utf-8")).hexdigest()
+            students.append({"pw": pw, "used": h in used_hashes, "assigned_to": None})
+    elif student_map:
+        for username, pw in student_map.items():
+            h = hashlib.sha256(f"{username}:{pw}".encode("utf-8")).hexdigest()
+            students.append({"username": username, "pw": pw, "used": h in used_hashes, "assigned_to": None})
+    else:
+        # fallback to file-backed student list (legacy)
+        students = file_creds.get("students", [])
+
+    # Admin: return both single password and admin_map (if present)
+    if admin_pw is None:
+        admin_pw = file_creds.get("admin")
+    admin_map_file = file_creds.get("admin_map", {})
+
+    # Merge file-admin-map only if secrets not provided
+    if not admin_map and isinstance(admin_map_file, dict):
+        admin_map = {str(k): str(v) for k, v in admin_map_file.items()}
+
+    return {"admin": admin_pw, "admin_map": admin_map, "students": students, "created_at": file_creds.get("created_at")}
 
 def save_credentials(creds: Dict[str, Any]):
     with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
         json.dump(creds, f, indent=2)
+
+
+def _hash_pw(pw: str) -> str:
+    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+
+
+def mark_student_used(token: str):
+    """Record a student's credential token as used by hashing it and storing the hash in the file-backed credentials.
+
+    token should be either a password (legacy) or a "username:password" string when STUDENT_MAP is used.
+    We avoid writing raw secrets to disk; only the hash is persisted to enforce single-use.
+    """
+    file_creds = {}
+    if os.path.exists(CREDENTIALS_PATH):
+        try:
+            with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+                file_creds = json.load(f)
+        except Exception:
+            file_creds = {}
+
+    used_hashes = set(file_creds.get("used_hashes", []))
+    used_hashes.add(_hash_pw(token))
+    file_creds["used_hashes"] = list(used_hashes)
+    file_creds["created_at"] = datetime.utcnow().isoformat()
+    # Only persist used_hashes (and created_at) to avoid storing raw passwords from secrets
+    try:
+        with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
+            json.dump({"used_hashes": file_creds["used_hashes"], "created_at": file_creds.get("created_at")}, f, indent=2)
+    except Exception:
+        # If saving fails, do not crash the app; just log
+        logger.exception("Failed to persist used student credential hash")
 
 def generate_password(length: int = 8) -> str:
     alphabet = string.ascii_letters + string.digits
@@ -52,8 +180,6 @@ def init_credentials():
             "created_at": datetime.utcnow().isoformat()
         }
         save_credentials(creds)
-        # Print admin password to console so presenter can retrieve it (file also exists)
-        print(f"[INIT] Admin password generated and saved to {CREDENTIALS_PATH}: {admin_pw}")
     return creds
 
 # Initialize credentials (if not present)
@@ -75,7 +201,6 @@ def regenerate_admin_password(length: int = 10):
     creds["admin"] = new_admin
     creds["created_at"] = datetime.utcnow().isoformat()
     save_credentials(creds)
-    print(f"[ADMIN-RESET] New admin password saved to {CREDENTIALS_PATH}: {new_admin}")
     return creds
 
 st.set_page_config(page_title="Who Might Get Along?", page_icon="🕸️", layout="wide")
@@ -99,42 +224,85 @@ if "student_pw" not in st.session_state:
 # If not authenticated, show a simple login screen and stop further rendering
 if not st.session_state.authenticated:
     st.title("🕸️ Who Might Get Along? — Login")
-    st.caption("Enter your provided password to continue. (Presenter: admin password is saved to credentials.json on first run.)")
+    st.caption("Provide your credentials to continue. If credentials are set in Streamlit Secrets, manage them there.")
+
+    creds = load_credentials()
+    students = creds.get("students", [])
+    # Detect whether students are username->password mapped
+    username_mode = any(isinstance(s, dict) and s.get("username") for s in students)
 
     with st.form("login_form"):
-        pw = st.text_input("Password", type="password")
+        if username_mode:
+            username = st.text_input("Username")
+            pw = st.text_input("Password", type="password")
+        else:
+            username = None
+            pw = st.text_input("Password", type="password")
+
         submit = st.form_submit_button("Log in")
 
         if submit:
             creds = load_credentials()
-            # Admin login
-            if pw and creds.get("admin") and pw == creds.get("admin"):
-                st.session_state.authenticated = True
-                st.session_state.is_admin = True
-                st.success("Logged in as admin")
-                st.experimental_rerun()
+            admin_pw = creds.get("admin")
+            admin_map = creds.get("admin_map", {})
 
-            # Student password login
-            students = creds.get("students", [])
+            # Admin login
+            # If an admin_map is provided (secrets-managed), require admin username+password
+            if admin_map:
+                if username and pw and username in admin_map and pw == admin_map.get(username):
+                    st.session_state.authenticated = True
+                    st.session_state.is_admin = True
+                    st.session_state.admin_username = username
+                    st.success("Logged in as admin")
+                    st.experimental_rerun()
+            else:
+                # Legacy admin: password-only (no username)
+                if pw and admin_pw and pw == admin_pw and not username:
+                    st.session_state.authenticated = True
+                    st.session_state.is_admin = True
+                    st.success("Logged in as admin")
+                    st.experimental_rerun()
+
+            # Student login
             matched = None
-            for s in students:
-                if s["pw"] == pw:
-                    matched = s
-                    break
+
+            if username_mode:
+                # Require both username and password
+                if not username or not pw:
+                    st.error("Please enter both username and password.")
+                else:
+                    for s in students:
+                        if s.get("username") == username and s.get("pw") == pw:
+                            matched = s
+                            break
+            else:
+                # Legacy: password-only list
+                for s in students:
+                    if s.get("pw") == pw:
+                        matched = s
+                        break
 
             if matched is None:
-                st.error("Invalid password. Please use one of the provided student passwords or the admin password.")
+                st.error("Invalid credentials. Please check your username/password or use the admin password.")
             else:
                 if matched.get("used"):
-                    st.error("This student password was already used. If you believe this is a mistake ask the admin to reset credentials.")
+                    st.error("This credential was already used. If you believe this is a mistake ask the admin to reset credentials.")
                 else:
-                    # mark as used and assign session
-                    matched["used"] = True
-                    matched["assigned_to"] = None
-                    save_credentials(creds)
+                    # mark as used (persist only the hash) so secrets-managed credentials remain secret
+                    try:
+                        if username_mode:
+                            token = f"{matched.get('username')}:{matched.get('pw')}"
+                        else:
+                            token = matched.get("pw")
+                        mark_student_used(token)
+                    except Exception:
+                        logger.exception("Failed to mark student credential as used")
+
                     st.session_state.authenticated = True
                     st.session_state.is_admin = False
-                    st.session_state.student_pw = matched["pw"]
+                    # store minimal indicator (do not store raw password)
+                    st.session_state.student_pw = matched.get("pw")
+                    st.session_state.student_username = matched.get("username") if matched.get("username") else None
                     st.success("Logged in as student")
                     st.experimental_rerun()
 
@@ -147,7 +315,6 @@ def log(message: str, level: str = "INFO"):
     log_entry = f"[{timestamp}] {level}: {message}"
     st.session_state.logs.append(log_entry)
     logger.info(log_entry)
-    print(log_entry) 
 
 # ---------- Simple in-memory "DB" ----------
 if "participants" not in st.session_state:
@@ -480,22 +647,41 @@ with st.sidebar:
     if st.session_state.get("authenticated") and st.session_state.get("is_admin"):
         with st.expander("🔒 Admin Panel", expanded=False):
             creds = load_credentials()
-            st.write("**Admin password (current):**")
-            st.code(creds.get("admin", "(not set)"))
+            # Detect if Streamlit secrets are being used
+            secrets_in_use = False
+            try:
+                if hasattr(st, "secrets") and st.secrets:
+                    if "ADMIN_PASSWORD" in st.secrets or "STUDENT_PASSWORDS" in st.secrets or "ADMIN_MAP" in st.secrets or "STUDENT_MAP" in st.secrets:
+                        secrets_in_use = True
+            except Exception:
+                secrets_in_use = False
 
-            st.write("**Student passwords (pw / used)**")
-            students = creds.get("students", [])
-            for i, s in enumerate(students, start=1):
-                used = s.get("used", False)
-                st.write(f"{i}. {s.get('pw')} — {'USED' if used else 'AVAILABLE'}")
+            if secrets_in_use:
+                st.info("Credentials are managed via Streamlit Secrets. Raw passwords are not shown here.")
+                students = creds.get("students", [])
+                total = len(students)
+                used = sum(1 for s in students if s.get("used"))
+                st.write(f"Student passwords: {total} total ({used} used)")
 
-            if st.button("🔁 Regenerate all student passwords"):
-                creds = regenerate_student_passwords(len(students) if students else 20)
-                st.success("Student passwords regenerated. Check the displayed list or download credentials.json")
+                st.write("Admin password: Managed in Streamlit Secrets")
 
-            if st.button("🔐 Regenerate admin password"):
-                creds = regenerate_admin_password()
-                st.success("Admin password regenerated. The new password is printed to the server console and stored in credentials.json")
+            else:
+                st.write("**Admin password (current):**")
+                st.code(creds.get("admin", "(not set)"))
+
+                st.write("**Student passwords (pw / used)**")
+                students = creds.get("students", [])
+                for i, s in enumerate(students, start=1):
+                    used = s.get("used", False)
+                    st.write(f"{i}. {s.get('pw')} — {'USED' if used else 'AVAILABLE'}")
+
+                if st.button("🔁 Regenerate all student passwords"):
+                    creds = regenerate_student_passwords(len(students) if students else 20)
+                    st.success("Student passwords regenerated. Check the displayed list or download credentials.json")
+
+                if st.button("🔐 Regenerate admin password"):
+                    creds = regenerate_admin_password()
+                    st.success("Admin password regenerated and stored in credentials.json")
 
             # Allow download of credentials.json
             try:
