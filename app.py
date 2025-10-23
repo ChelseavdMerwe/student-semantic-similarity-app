@@ -225,6 +225,20 @@ if "student_pw" not in st.session_state:
 if not st.session_state.authenticated:
     st.title("🕸️ Who Might Get Along? — Login")
     st.caption("Provide your credentials to continue. If credentials are set in Streamlit Secrets, manage them there.")
+    
+    # --- DEBUG: show non-sensitive secrets presence (keys and counts only) ---
+    try:
+        secrets_keys = list(st.secrets.keys()) if hasattr(st, "secrets") and st.secrets else []
+    except Exception:
+        secrets_keys = []
+
+    creds_preview = load_credentials()
+    admin_map_count = len(creds_preview.get("admin_map", {}) or {})
+    student_user_count = sum(1 for s in creds_preview.get("students", []) if isinstance(s, dict) and s.get("username"))
+    if secrets_keys:
+        st.info(f"Debug: secrets keys present: {', '.join(secrets_keys)} | admin_map entries: {admin_map_count} | student_map usernames: {student_user_count}")
+    else:
+        st.info("Debug: no Streamlit secrets detected")
 
     creds = load_credentials()
     students = creds.get("students", [])
