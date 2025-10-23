@@ -228,16 +228,14 @@ if not st.session_state.authenticated:
 
     creds = load_credentials()
     students = creds.get("students", [])
-    # Detect whether students are username->password mapped
-    username_mode = any(isinstance(s, dict) and s.get("username") for s in students)
+    # Detect whether students are username->password mapped OR an admin_map exists
+    # (if admin_map is present we need a username field for admin login too)
+    username_mode = bool(creds.get("admin_map")) or any(isinstance(s, dict) and s.get("username") for s in students)
 
     with st.form("login_form"):
-        if username_mode:
-            username = st.text_input("Username")
-            pw = st.text_input("Password", type="password")
-        else:
-            username = None
-            pw = st.text_input("Password", type="password")
+        # Always show username field (user can leave it blank for legacy admin-password-only flow)
+        username = st.text_input("Username (leave blank if not applicable)")
+        pw = st.text_input("Password", type="password")
 
         submit = st.form_submit_button("Log in")
 
@@ -256,8 +254,8 @@ if not st.session_state.authenticated:
                     st.success("Logged in as admin")
                     st.experimental_rerun()
             else:
-                # Legacy admin: password-only (no username)
-                if pw and admin_pw and pw == admin_pw and not username:
+                # Legacy admin: password-only (no username required)
+                if pw and admin_pw and pw == admin_pw:
                     st.session_state.authenticated = True
                     st.session_state.is_admin = True
                     st.success("Logged in as admin")
