@@ -32,9 +32,15 @@ def load_credentials() -> Dict[str, Any]:
             file_creds = {}
 
     # Helper to parse student list from secrets (accept list or comma/newline-separated string)
+    from collections.abc import Mapping
+
     def _parse_student_pw_list(raw):
         if raw is None:
             return []
+        # Handle mapping-like objects (Streamlit secrets may provide a mapping)
+        if isinstance(raw, Mapping):
+            # If it's a mapping, assume values are the passwords
+            return [str(v) for v in raw.values()]
         if isinstance(raw, list):
             return [str(x) for x in raw]
         # assume string
@@ -49,25 +55,31 @@ def load_credentials() -> Dict[str, Any]:
         return result
     
     def _parse_student_map(raw):
-        # Accept either a dict-like object or a JSON string mapping username->password
+        # Accept either a mapping-like object or a JSON string mapping username->password
         if raw is None:
             return {}
-        if isinstance(raw, dict):
+        if isinstance(raw, Mapping):
             return {str(k): str(v) for k, v in raw.items()}
         try:
-            # try parse as JSON
-            return json.loads(str(raw))
+            # try parse as JSON string
+            parsed = json.loads(str(raw))
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items()}
+            return {}
         except Exception:
             return {}
     
     def _parse_admin_map(raw):
-        # Accept either a dict-like object or a JSON string mapping admin_username->password
+        # Accept either a mapping-like object or a JSON string mapping admin_username->password
         if raw is None:
             return {}
-        if isinstance(raw, dict):
+        if isinstance(raw, Mapping):
             return {str(k): str(v) for k, v in raw.items()}
         try:
-            return json.loads(str(raw))
+            parsed = json.loads(str(raw))
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items()}
+            return {}
         except Exception:
             return {}
 
