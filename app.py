@@ -1267,18 +1267,33 @@ elif st.session_state.current_step == 3:
     # Controls
     col1, col2, col3 = st.columns(3)
     with col1:
-        sim_threshold = st.slider(
-            "Connection Threshold",
-            0.0,
-            1.0,
-            0.20,
-            0.05,
+        st.write("Connection strength")
+        presets = {
+            "More connections": 0.15,
+            "Balanced": 0.20,
+            "Stronger matches": 0.35,
+            "Very strong only": 0.50,
+        }
+        chosen_label = st.selectbox(
+            "Pick a setting",
+            list(presets.keys()),
+            index=1,
             help=(
-                "Only draw a line when two students' total match is at least this number. "
-                "The total mix is: hobbies (30%), images (30%), music (15%), tags (15%), fun fact (10%). "
-                "Move left to see more lines; move right to show only strong matches. Try 0.20–0.30."
+                "Choose how strict the matching is. More connections shows lots of lines; "
+                "Very strong only shows just the best matches."
             ),
+            label_visibility="collapsed",
         )
+        sim_threshold = float(presets[chosen_label])
+
+        with st.expander("Advanced", expanded=False):
+            use_custom = st.checkbox("Use custom number")
+            custom = st.number_input(
+                "Custom threshold (0–1)", min_value=0.0, max_value=1.0, value=sim_threshold, step=0.05
+            )
+            if use_custom:
+                sim_threshold = float(custom)
+
         st.caption(f"Lines show when total match ≥ {sim_threshold:.0%}")
     with col2:
         if st.button("🔄 Refresh Network"):
@@ -1531,7 +1546,77 @@ elif st.session_state.current_step == 3:
             if not st.session_state.participants:
                 st.caption("No participants yet")
             else:
-                for p in st.session_state.participants:
+                # Controls to manage long lists: search and pagination
+                st.caption("Filter and paginate to keep this list manageable for larger classes.")
+                search_q = st.text_input(
+                    "Search (name, hobby, tag, or music)",
+                    value=st.session_state.get("participants_search", ""),
+                    key="participants_search",
+                    help="Type to narrow the list. Tries to match name, hobbies, tags, and music."
+                )
+
+                # Prepare filtered list
+                def p_matches(p, q: str) -> bool:
+                    if not q:
+                        return True
+                    ql = q.strip().lower()
+                    if ql in p.get("name", "").lower():
+                        return True
+                    if ql in p.get("music", "").lower():
+                        return True
+                    if any(ql in h.lower() for h in p.get("hobbies", []) or []):
+                        return True
+                    if any(ql in t.lower() for t in p.get("image_tags", []) or []):
+                        return True
+                    if any(ql in t.lower() for t in p.get("ai_themes", []) or []):
+                        return True
+                    return False
+
+                filtered = [p for p in st.session_state.participants if p_matches(p, search_q)]
+
+                # Sort controls (simple: name asc/desc)
+                sort_label = st.selectbox(
+                    "Sort by",
+                    ["Name (A→Z)", "Name (Z→A)"],
+                    index=0,
+                    key="participants_sort"
+                )
+                reverse_sort = sort_label == "Name (Z→A)"
+                try:
+                    filtered.sort(key=lambda p: p.get("name", "").lower(), reverse=reverse_sort)
+                except Exception:
+                    # Fallback if any bad data sneaks in
+                    filtered.sort(key=lambda p: str(p.get("name", "")).lower(), reverse=reverse_sort)
+
+                # Pagination controls
+                per_page_options = [6, 8, 10, 12, 16, 24]
+                per_page_default_idx = 3 if 12 in per_page_options else 0
+                per_page = st.selectbox(
+                    "Per page",
+                    per_page_options,
+                    index=per_page_default_idx,
+                    key="participants_per_page"
+                )
+
+                total_items = len(filtered)
+                total_pages = max(1, (total_items + per_page - 1) // per_page)
+                current_page = st.number_input(
+                    "Page",
+                    min_value=1,
+                    max_value=int(total_pages),
+                    value=min(st.session_state.get("participants_page", 1), int(total_pages)),
+                    step=1,
+                    key="participants_page",
+                    help=f"{total_items} students • {total_pages} pages"
+                )
+
+                # Compute slice
+                start = (int(current_page) - 1) * int(per_page)
+                end = start + int(per_page)
+                page_slice = filtered[start:end]
+
+                # Display items for the current page
+                for p in page_slice:
                     with st.expander(f"👤 {p['name']}"):
                         st.write(f"**Music:** {p['music']}")
                         st.write(f"**Hobbies:** {', '.join(p['hobbies'])}")
@@ -1564,3 +1649,6 @@ elif st.session_state.current_step == 3:
                                     st.caption("📷 Image uploaded (file no longer available)")
                             except Exception:
                                 st.caption("📷 Image uploaded (display error)")
+
+                # Footer: page info (compact)
+                st.caption(f"Page {int(current_page)} of {int(total_pages)} • Showing {len(page_slice)} of {total_items}")
