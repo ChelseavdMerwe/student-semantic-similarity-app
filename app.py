@@ -173,6 +173,27 @@ def mark_student_used(token: str):
         # If saving fails, do not crash the app; just log
         logger.exception("Failed to persist used student credential hash")
 
+
+def safe_rerun():
+    """Attempt to trigger a rerun in a Streamlit-compatible way without raising if the API isn't present."""
+    try:
+        if hasattr(st, "experimental_rerun"):
+            st.experimental_rerun()
+            return
+    except Exception:
+        pass
+    try:
+        if hasattr(st, "rerun"):
+            st.rerun()
+            return
+    except Exception:
+        pass
+    # Fall back to stopping the script; the app will refresh on next user interaction.
+    try:
+        st.stop()
+    except Exception:
+        return
+
 def generate_password(length: int = 8) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
@@ -278,14 +299,14 @@ if not st.session_state.authenticated:
                     st.session_state.is_admin = True
                     st.session_state.admin_username = username
                     st.success("Logged in as admin")
-                    st.experimental_rerun()
+                    safe_rerun()
             else:
                 # Legacy admin: password-only (no username required)
                 if pw and admin_pw and pw == admin_pw:
                     st.session_state.authenticated = True
                     st.session_state.is_admin = True
                     st.success("Logged in as admin")
-                    st.experimental_rerun()
+                    safe_rerun()
 
             # Student login
             matched = None
@@ -328,7 +349,7 @@ if not st.session_state.authenticated:
                     st.session_state.student_pw = matched.get("pw")
                     st.session_state.student_username = matched.get("username") if matched.get("username") else None
                     st.success("Logged in as student")
-                    st.experimental_rerun()
+                    safe_rerun()
 
     # Stop further rendering until logged in
     st.stop()
