@@ -1,5 +1,3 @@
-
-# app.py
 import streamlit as st
 from typing import List, Dict, Any
 import networkx as nx
@@ -11,21 +9,18 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load .env into environment (if present)
 load_dotenv()
 import json
 import secrets
 import string
 import hashlib
 
-# --- Credentials file (persistent for the app run) ---
 CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), "credentials.json")
 PARTICIPANTS_PATH = os.path.join(os.path.dirname(__file__), "participants.json")
 SESSIONS_PATH = os.path.join(os.path.dirname(__file__), "sessions.json")
 USER_SESSIONS_PATH = os.path.join(os.path.dirname(__file__), "user_sessions.json")
 
 def load_credentials() -> Dict[str, Any]:
-    # Read file-backed data (used-state, fallback credentials)
     file_creds: Dict[str, Any] = {}
     if os.path.exists(CREDENTIALS_PATH):
         try:
@@ -1462,84 +1457,110 @@ elif st.session_state.current_step == 3:
             render_pyvis(G)
 
     with col2:
-        st.subheader(f"Participants ({len(st.session_state.participants)})")
-        
-        # Connection details (kid-friendly reasons)
-        if len(st.session_state.participants) >= 2:
-            with st.expander("🔗 Connection Details", expanded=False):
-                st.markdown("### Why Are People Connected?")
-                for i in range(len(st.session_state.participants)):
-                    for j in range(i+1, len(st.session_state.participants)):
+        n_participants = len(st.session_state.participants)
+        st.subheader(f"Participants ({n_participants})")
+
+        tabs = st.tabs(["Connections", f"All Participants ({n_participants})"])
+
+        # --- Tab 1: Connections (with focus + top-N controls) ---
+        with tabs[0]:
+            if n_participants < 2:
+                st.caption("Waiting for more participants…")
+            else:
+                names = sorted([p['name'] for p in st.session_state.participants])
+                focus = st.selectbox("Show connections for", ["Everyone"] + names, index=0)
+
+                # Build the list of current edges (pairs) that meet the threshold
+                pairs = []
+                for i in range(n_participants):
+                    for j in range(i+1, n_participants):
                         p1 = st.session_state.participants[i]
                         p2 = st.session_state.participants[j]
                         sim = similarity(p1, p2)
                         if sim >= sim_threshold:
-                            st.markdown(f"**{p1['name']} ↔ {p2['name']}** ({sim:.0%} match)")
+                            pairs.append({"p1": p1, "p2": p2, "sim": sim})
 
-                            shared_hobbies = set(p1['hobbies']) & set(p2['hobbies'])
-                            same_music = p1['music'] == p2['music']
-                            shared_tags = set(p1['image_tags']) & set(p2['image_tags'])
-                            shared_ai = set(p1.get('ai_themes', [])) & set(p2.get('ai_themes', []))
+                # Optional focus filter
+                if focus != "Everyone":
+                    pairs = [e for e in pairs if e["p1"]["name"] == focus or e["p2"]["name"] == focus]
 
-                            # Pictures feel similar percent (if embeddings available)
-                            embedding1 = p1.get('ai_embedding', [])
-                            embedding2 = p2.get('ai_embedding', [])
-                            semantic_sim = cosine_similarity(embedding1, embedding2) if embedding1 and embedding2 else 0
+                # Sort by similarity, highest first
+                pairs.sort(key=lambda e: e["sim"], reverse=True)
 
-                            reasons = []
-                            if shared_hobbies:
-                                reasons.append(f"🎨 Hobbies you both like: {', '.join(shared_hobbies)}")
-                            if same_music:
-                                reasons.append(f"🎵 Both like {p1['music']} music")
-                            if shared_tags:
-                                reasons.append(f"🏷️ Similar tags: {', '.join(shared_tags)}")
-                            if shared_ai:
-                                reasons.append(f"🤖 Image keywords in common: {', '.join(sorted(shared_ai))}")
-                            if semantic_sim > 0.7:
-                                reasons.append(f"✨ Pictures feel similar: {semantic_sim:.0%}")
+                # Top-N control to avoid very long lists
+                max_show = len(pairs) if pairs else 0
+                if max_show > 0:
+                    top_n = st.slider("How many to show", 3, max_show, min(10, max_show))
+                    pairs = pairs[:top_n]
+                else:
+                    st.caption("No connections at this threshold")
 
-                            if reasons:
-                                for reason in reasons:
-                                    st.caption(f"  • {reason}")
-                            st.markdown("---")
-        
-        if not st.session_state.participants:
-            st.caption("No participants yet")
-        else:
-            st.markdown("### All Participants")
-            for p in st.session_state.participants:
-                with st.expander(f"👤 {p['name']}"):
-                    st.write(f"**Music:** {p['music']}")
-                    st.write(f"**Hobbies:** {', '.join(p['hobbies'])}")
-                    st.write(f"**Fun fact:** {p['fun_fact']}")
-                    if p['image_tags']:
-                        st.write(f"**Manual Tags:** {', '.join(p['image_tags'])}")
-                    
-                    # Show AI analysis if available
-                    if p.get('ai_themes'):
-                        st.write(f"**🤖 AI Detected:** {', '.join(p['ai_themes'])}")
-                        if p.get('ai_description'):
-                            st.caption(f"_{p['ai_description']}_")
-                    
-                    # Show images (new: support up to 2 images per participant)
-                    if p.get("images"):
-                        imgs = p.get("images", [])
-                        for img in imgs:
+                # Display the pairs with kid‑friendly reasons
+                for e in pairs:
+                    p1, p2, sim = e["p1"], e["p2"], e["sim"]
+                    st.markdown(f"**{p1['name']} ↔ {p2['name']}** ({sim:.0%} match)")
+
+                    shared_hobbies = set(p1['hobbies']) & set(p2['hobbies'])
+                    same_music = p1['music'] == p2['music']
+                    shared_tags = set(p1['image_tags']) & set(p2['image_tags'])
+                    shared_ai = set(p1.get('ai_themes', [])) & set(p2.get('ai_themes', []))
+
+                    embedding1 = p1.get('ai_embedding', [])
+                    embedding2 = p2.get('ai_embedding', [])
+                    semantic_sim = cosine_similarity(embedding1, embedding2) if embedding1 and embedding2 else 0
+
+                    reasons = []
+                    if shared_hobbies:
+                        reasons.append(f"🎨 Hobbies you both like: {', '.join(shared_hobbies)}")
+                    if same_music:
+                        reasons.append(f"🎵 Both like {p1['music']} music")
+                    if shared_tags:
+                        reasons.append(f"🏷️ Similar tags: {', '.join(shared_tags)}")
+                    if shared_ai:
+                        reasons.append(f"🤖 Image keywords in common: {', '.join(sorted(shared_ai))}")
+                    if semantic_sim > 0.7:
+                        reasons.append(f"✨ Pictures feel similar: {semantic_sim:.0%}")
+
+                    if reasons:
+                        for r in reasons:
+                            st.caption(f"  • {r}")
+                    st.markdown("---")
+
+        # --- Tab 2: All Participants ---
+        with tabs[1]:
+            if not st.session_state.participants:
+                st.caption("No participants yet")
+            else:
+                for p in st.session_state.participants:
+                    with st.expander(f"👤 {p['name']}"):
+                        st.write(f"**Music:** {p['music']}")
+                        st.write(f"**Hobbies:** {', '.join(p['hobbies'])}")
+                        st.write(f"**Fun fact:** {p['fun_fact']}")
+                        if p['image_tags']:
+                            st.write(f"**Manual Tags:** {', '.join(p['image_tags'])}")
+
+                        if p.get('ai_themes'):
+                            st.write(f"**🤖 AI Detected:** {', '.join(p['ai_themes'])}")
+                            if p.get('ai_description'):
+                                st.caption(f"_{p['ai_description']}_")
+
+                        if p.get("images"):
+                            imgs = p.get("images", [])
+                            for img in imgs:
+                                try:
+                                    st.image(img.get("data"), caption=img.get("name", "Uploaded image"))
+                                except Exception:
+                                    st.caption(f"📷 {img.get('name', 'uploaded image')} (display error)")
+                        elif p.get("image_data"):
                             try:
-                                st.image(img.get("data"), caption=img.get("name", "Uploaded image"))
+                                st.image(p["image_data"], width='stretch', caption=p.get("image_name", "Uploaded image"))
                             except Exception:
-                                st.caption(f"📷 {img.get('name', 'uploaded image')} (display error)")
-                    elif p.get("image_data"):
-                        # Backwards compatibility for older single-image participants
-                        try:
-                            st.image(p["image_data"], width='stretch', caption=p.get("image_name", "Uploaded image"))
-                        except Exception:
-                            st.caption("📷 Image uploaded (display error)")
-                    elif p.get("image_path"):
-                        try:
-                            if os.path.exists(p["image_path"]):
-                                st.image(p["image_path"], width='stretch')
-                            else:
-                                st.caption("📷 Image uploaded (file no longer available)")
-                        except Exception:
-                            st.caption("📷 Image uploaded (display error)")
+                                st.caption("📷 Image uploaded (display error)")
+                        elif p.get("image_path"):
+                            try:
+                                if os.path.exists(p["image_path"]):
+                                    st.image(p["image_path"], width='stretch')
+                                else:
+                                    st.caption("📷 Image uploaded (file no longer available)")
+                            except Exception:
+                                st.caption("📷 Image uploaded (display error)")
