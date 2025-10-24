@@ -419,8 +419,10 @@ logger = logging.getLogger(__name__)
 # Generate or retrieve a stable sid via query parameters (no custom JS required).
 sid = None
 try:
-    params = st.experimental_get_query_params()
-    sid = params.get("sid", [None])[0]
+    params = st.query_params
+    sid = params.get("sid")
+    if isinstance(sid, list):
+        sid = sid[0] if sid else None
 except Exception:
     sid = None
 
@@ -428,23 +430,22 @@ if not sid:
     # Create a new sid and set it in the URL so it survives refreshes
     sid = str(uuid.uuid4())
     try:
-        st.experimental_set_query_params(sid=sid)
+        # Set or update a single key without clobbering others
+        st.query_params["sid"] = sid
     except Exception:
         pass
 
 # If we have a sid, attempt to rehydrate minimal session state (non-sensitive)
 if sid:
-        try:
-                loaded = load_session_into_state(sid)
-                if loaded:
-                        logger.info(f"Session {sid} rehydrated into st.session_state")
-                else:
-                        try:
-                                st.info("Found a local session token but no saved session data yet. Your next actions will be saved for future refreshes.")
-                        except Exception:
-                                pass
-        except Exception:
-                logger.exception("Failed to load session into state")
+    try:
+        loaded = load_session_into_state(sid)
+        if loaded:
+            logger.info(f"Session {sid} rehydrated into st.session_state")
+        else:
+            # Quietly continue without a user-facing notice
+            logger.debug("Session token present but no saved session data; proceeding silently")
+    except Exception:
+        logger.exception("Failed to load session into state")
 
 # Initialize logs in session state
 if "logs" not in st.session_state:
@@ -468,14 +469,6 @@ if not st.session_state.authenticated:
         secrets_keys = list(st.secrets.keys()) if hasattr(st, "secrets") and st.secrets else []
     except Exception:
         secrets_keys = []
-
-    creds_preview = load_credentials()
-    admin_map_count = len(creds_preview.get("admin_map", {}) or {})
-    student_user_count = sum(1 for s in creds_preview.get("students", []) if isinstance(s, dict) and s.get("username"))
-    if secrets_keys:
-        st.info(f"Debug: secrets keys present: {', '.join(secrets_keys)} | admin_map entries: {admin_map_count} | student_map usernames: {student_user_count}")
-    else:
-        st.info("Debug: no Streamlit secrets detected")
 
     creds = load_credentials()
     students = creds.get("students", [])
