@@ -22,6 +22,7 @@ import hashlib
 CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), "credentials.json")
 PARTICIPANTS_PATH = os.path.join(os.path.dirname(__file__), "participants.json")
 SESSIONS_PATH = os.path.join(os.path.dirname(__file__), "sessions.json")
+USER_SESSIONS_PATH = os.path.join(os.path.dirname(__file__), "user_sessions.json")
 
 def load_credentials() -> Dict[str, Any]:
     # Read file-backed data (used-state, fallback credentials)
@@ -294,6 +295,52 @@ def save_sessions(sessions: Dict[str, Any]):
         logger.exception("Failed to save sessions to disk")
 
 
+# --- Username-scoped session persistence (for re-login across devices) ---
+def _minimal_state_from_session() -> Dict[str, Any]:
+    return {
+        "authenticated": bool(st.session_state.get("authenticated", False)),
+        "is_admin": bool(st.session_state.get("is_admin", False)),
+        "admin_username": st.session_state.get("admin_username"),
+        "student_username": st.session_state.get("student_username"),
+        "current_step": int(st.session_state.get("current_step", 1)),
+        "user_profile": st.session_state.get("user_profile", {}),
+        "user_completed": bool(st.session_state.get("user_completed", False)),
+    }
+
+def load_user_sessions() -> Dict[str, Any]:
+    try:
+        if os.path.exists(USER_SESSIONS_PATH):
+            with open(USER_SESSIONS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        logger.exception("Failed to load user sessions from disk")
+    return {}
+
+def save_user_sessions(mapping: Dict[str, Any]):
+    try:
+        tmp = USER_SESSIONS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, indent=2)
+        os.replace(tmp, USER_SESSIONS_PATH)
+    except Exception:
+        logger.exception("Failed to save user sessions to disk")
+
+def save_user_session_for_current(username: str):
+    if not username:
+        return
+    mapping = load_user_sessions()
+    mapping[str(username)] = _minimal_state_from_session()
+    save_user_sessions(mapping)
+
+def load_user_session(username: str) -> Dict[str, Any]:
+    if not username:
+        return {}
+    mapping = load_user_sessions()
+    return mapping.get(str(username), {})
+
+
 def save_current_session(sid: str):
     """Save minimal, non-sensitive parts of st.session_state under sid."""
     if not sid:
@@ -540,8 +587,10 @@ if not st.session_state.authenticated:
                 if matched is None:
                     st.error("Invalid credentials. Please check your username/password or use the admin password.")
                 else:
-                    if matched.get("used"):
-                        st.error("This credential was already used. If you believe this is a mistake ask the admin to reset credentials.")
+                    if matched.get("used") and not (username_mode and matched.get("username") == username):
+                        # In username+password mode, allow the same student to log in again with their own credentials.
+                        # In password-only mode, keep single-use enforcement.
+                        st.error("This credential was already used. If this is your account, ask the teacher to enable re-login with username.")
                     else:
                         # mark as used (persist only the hash) so secrets-managed credentials remain secret
                         try:
@@ -559,10 +608,25 @@ if not st.session_state.authenticated:
                         st.session_state.student_pw = matched.get("pw")
                         st.session_state.student_username = matched.get("username") if matched.get("username") else None
                         st.success("Logged in as student")
+                        # If we are in username mode, try loading their saved session state
+                        try:
+                            if username_mode and st.session_state.student_username:
+                                prior = load_user_session(st.session_state.student_username)
+                                if prior:
+                                    st.session_state.current_step = int(prior.get("current_step", st.session_state.current_step))
+                                    st.session_state.user_profile = prior.get("user_profile", st.session_state.user_profile)
+                                    st.session_state.user_completed = bool(prior.get("user_completed", st.session_state.user_completed))
+                        except Exception:
+                            logger.exception("Failed to load prior user session by username")
                         try:
                             save_current_session(sid)
                         except Exception:
                             logger.exception("Failed to save session after student login")
+                        try:
+                            if username_mode and st.session_state.student_username:
+                                save_user_session_for_current(st.session_state.student_username)
+                        except Exception:
+                            logger.exception("Failed to save user-scoped session after login")
                         logged_in = True
 
             # If we logged in successfully (admin or student), rerun to render the app
@@ -910,6 +974,21 @@ with st.sidebar:
         st.caption("Using manual tags only (no API costs)")
     
     st.markdown("---")
+    # Logout control for any authenticated user
+    if st.session_state.get("authenticated"):
+        if st.button("🚪 Log out"):
+            st.session_state.authenticated = False
+            st.session_state.is_admin = False
+            st.session_state.admin_username = None
+            st.session_state.student_username = None
+            st.session_state.student_pw = None
+            # Keep participants; reset wizard step for a fresh start next time
+            st.session_state.current_step = 1
+            try:
+                save_current_session(sid)
+            except Exception:
+                logger.exception("Failed to save session on logout")
+            st.rerun()
     
     # Admin panel (only visible to admin users)
     if st.session_state.get("authenticated") and st.session_state.get("is_admin"):
@@ -1047,6 +1126,11 @@ if st.session_state.current_step == 1:
                 except Exception:
                     logger.exception("Failed to save session after moving to step 2")
                 # Immediately navigate to Step 2 after a valid submission
+                try:
+                    if st.session_state.get("student_username"):
+                        save_user_session_for_current(st.session_state.get("student_username"))
+                except Exception:
+                    logger.exception("Failed to save user session after moving to step 2")
                 st.rerun()
 # STEP 2: Images and Tags
 elif st.session_state.current_step == 2:
@@ -1169,6 +1253,11 @@ elif st.session_state.current_step == 2:
                 save_current_session(sid)
             except Exception:
                 logger.exception("Failed to save session after adding participant")
+            try:
+                if st.session_state.get("student_username"):
+                    save_user_session_for_current(st.session_state.get("student_username"))
+            except Exception:
+                logger.exception("Failed to save user session after adding participant")
             # Navigate to Step 3 immediately after adding
             st.rerun()
 
