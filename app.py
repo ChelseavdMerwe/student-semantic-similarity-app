@@ -436,7 +436,7 @@ if not sid:
         pass
 
 # If we have a sid, attempt to rehydrate minimal session state (non-sensitive)
-if sid:
+if sid and not st.session_state.get("rehydrated_from_sid"):
     try:
         loaded = load_session_into_state(sid)
         if loaded:
@@ -446,6 +446,9 @@ if sid:
             logger.debug("Session token present but no saved session data; proceeding silently")
     except Exception:
         logger.exception("Failed to load session into state")
+    finally:
+        # Ensure we don't overwrite live session changes on subsequent reruns
+        st.session_state.rehydrated_from_sid = True
 
 # Initialize logs in session state
 if "logs" not in st.session_state:
@@ -487,6 +490,7 @@ if not st.session_state.authenticated:
             creds = load_credentials()
             admin_pw = creds.get("admin")
             admin_map = creds.get("admin_map", {})
+            logged_in = False
 
             # Admin login
             # If an admin_map is provided (secrets-managed), require admin username+password
@@ -500,6 +504,7 @@ if not st.session_state.authenticated:
                         save_current_session(sid)
                     except Exception:
                         logger.exception("Failed to save session after admin login")
+                    logged_in = True
             else:
                 # Legacy admin: password-only (no username required)
                 if pw and admin_pw and pw == admin_pw:
@@ -510,55 +515,63 @@ if not st.session_state.authenticated:
                         save_current_session(sid)
                     except Exception:
                         logger.exception("Failed to save session after admin login")
+                    logged_in = True
 
-            # Student login
-            matched = None
+            # Student login (only if not already logged in as admin)
+            if not st.session_state.get("authenticated"):
+                matched = None
 
-            if username_mode:
-                # Require both username and password
-                if not username or not pw:
-                    st.error("Please enter both username and password.")
+                if username_mode:
+                    # Require both username and password
+                    if not username or not pw:
+                        st.error("Please enter both username and password.")
+                    else:
+                        for s in students:
+                            if s.get("username") == username and s.get("pw") == pw:
+                                matched = s
+                                break
                 else:
+                    # Legacy: password-only list
                     for s in students:
-                        if s.get("username") == username and s.get("pw") == pw:
+                        if s.get("pw") == pw:
                             matched = s
                             break
-            else:
-                # Legacy: password-only list
-                for s in students:
-                    if s.get("pw") == pw:
-                        matched = s
-                        break
 
-            if matched is None:
-                st.error("Invalid credentials. Please check your username/password or use the admin password.")
-            else:
-                if matched.get("used"):
-                    st.error("This credential was already used. If you believe this is a mistake ask the admin to reset credentials.")
+                if matched is None:
+                    st.error("Invalid credentials. Please check your username/password or use the admin password.")
                 else:
-                    # mark as used (persist only the hash) so secrets-managed credentials remain secret
-                    try:
-                        if username_mode:
-                            token = f"{matched.get('username')}:{matched.get('pw')}"
-                        else:
-                            token = matched.get("pw")
-                        mark_student_used(token)
-                    except Exception:
-                        logger.exception("Failed to mark student credential as used")
+                    if matched.get("used"):
+                        st.error("This credential was already used. If you believe this is a mistake ask the admin to reset credentials.")
+                    else:
+                        # mark as used (persist only the hash) so secrets-managed credentials remain secret
+                        try:
+                            if username_mode:
+                                token = f"{matched.get('username')}:{matched.get('pw')}"
+                            else:
+                                token = matched.get("pw")
+                            mark_student_used(token)
+                        except Exception:
+                            logger.exception("Failed to mark student credential as used")
 
-                    st.session_state.authenticated = True
-                    st.session_state.is_admin = False
-                    # store minimal indicator (do not store raw password)
-                    st.session_state.student_pw = matched.get("pw")
-                    st.session_state.student_username = matched.get("username") if matched.get("username") else None
-                    st.success("Logged in as student")
-                    try:
-                        save_current_session(sid)
-                    except Exception:
-                        logger.exception("Failed to save session after student login")
+                        st.session_state.authenticated = True
+                        st.session_state.is_admin = False
+                        # store minimal indicator (do not store raw password)
+                        st.session_state.student_pw = matched.get("pw")
+                        st.session_state.student_username = matched.get("username") if matched.get("username") else None
+                        st.success("Logged in as student")
+                        try:
+                            save_current_session(sid)
+                        except Exception:
+                            logger.exception("Failed to save session after student login")
+                        logged_in = True
 
-    # Stop further rendering until logged in
-    st.stop()
+            # If we logged in successfully (admin or student), rerun to render the app
+            if logged_in:
+                st.rerun()
+
+    # Stop further rendering until logged in (if login didn't happen this run)
+    if not st.session_state.authenticated:
+        st.stop()
 
 def log(message: str, level: str = "INFO"):
     """Add a log entry with timestamp"""
@@ -1030,6 +1043,8 @@ if st.session_state.current_step == 1:
                     save_current_session(sid)
                 except Exception:
                     logger.exception("Failed to save session after moving to step 2")
+                # Immediately navigate to Step 2 after a valid submission
+                st.rerun()
 # STEP 2: Images and Tags
 elif st.session_state.current_step == 2:
     st.subheader("Step 2: Show us your personality!")
@@ -1059,7 +1074,12 @@ elif st.session_state.current_step == 2:
     with col1:
         if st.button("← Back to Step 1"):
             st.session_state.current_step = 1
-            pass
+            # Persist step change and navigate immediately
+            try:
+                save_current_session(sid)
+            except Exception:
+                logger.exception("Failed to save session after back to step 1")
+            st.rerun()
     
     with col2:
         if st.button("Add to Network →"):
@@ -1146,8 +1166,8 @@ elif st.session_state.current_step == 2:
                 save_current_session(sid)
             except Exception:
                 logger.exception("Failed to save session after adding participant")
-
-            st.success(f"Welcome to the network, {st.session_state.user_profile['name']}! 🎉")
+            # Navigate to Step 3 immediately after adding
+            st.rerun()
 
 # STEP 3: View Network
 elif st.session_state.current_step == 3:
