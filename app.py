@@ -1477,13 +1477,20 @@ elif st.session_state.current_step == 3:
 
         tabs = st.tabs(["Connections", f"All Participants ({n_participants})"])
 
-        # --- Tab 1: Connections (with focus + top-N controls) ---
+        # --- Tab 1: Connections (with focus + filters + limit controls) ---
         with tabs[0]:
             if n_participants < 2:
                 st.caption("Waiting for more participants…")
             else:
                 names = sorted([p['name'] for p in st.session_state.participants])
                 focus = st.selectbox("Show connections for", ["Everyone"] + names, index=0)
+                name_query = st.text_input(
+                    "Filter by name",
+                    value=st.session_state.get("connections_name_query", ""),
+                    key="connections_name_query",
+                    placeholder="Type a name to filter the list",
+                    help="Filters pairs where either person's name contains this text."
+                )
 
                 # Build the list of current edges (pairs) that meet the threshold
                 pairs = []
@@ -1499,14 +1506,34 @@ elif st.session_state.current_step == 3:
                 if focus != "Everyone":
                     pairs = [e for e in pairs if e["p1"]["name"] == focus or e["p2"]["name"] == focus]
 
+                # Optional free-text name filter
+                if name_query.strip():
+                    q = name_query.strip().lower()
+                    pairs = [
+                        e for e in pairs
+                        if q in e["p1"]["name"].lower() or q in e["p2"]["name"].lower()
+                    ]
+
                 # Sort by similarity, highest first
                 pairs.sort(key=lambda e: e["sim"], reverse=True)
 
-                # Top-N control to avoid very long lists
+                # Limit control to avoid very long lists (no slider; neutral controls)
                 max_show = len(pairs) if pairs else 0
                 if max_show > 0:
-                    top_n = st.slider("How many to show", 3, max_show, min(10, max_show))
-                    pairs = pairs[:top_n]
+                    col_limit1, col_limit2 = st.columns([1,1])
+                    with col_limit1:
+                        show_all = st.checkbox("Show all", value=False, key="connections_show_all")
+                    with col_limit2:
+                        top_n = st.number_input(
+                            "How many to show",
+                            min_value=1,
+                            max_value=max_show,
+                            value=min(10, max_show),
+                            step=1,
+                            key="connections_top_n"
+                        )
+                    if not show_all:
+                        pairs = pairs[: int(top_n)]
                 else:
                     st.caption("No connections at this threshold")
 
