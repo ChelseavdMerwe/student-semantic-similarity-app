@@ -1375,16 +1375,44 @@ elif st.session_state.current_step == 3:
     with col2:
         st.subheader(f"Participants ({len(st.session_state.participants)})")
         
-        # Connections list (simple)
+        # Connection details (kid-friendly reasons)
         if len(st.session_state.participants) >= 2:
-            with st.expander("🔗 Connections", expanded=False):
+            with st.expander("🔗 Connection Details", expanded=False):
+                st.markdown("### Why Are People Connected?")
                 for i in range(len(st.session_state.participants)):
                     for j in range(i+1, len(st.session_state.participants)):
                         p1 = st.session_state.participants[i]
                         p2 = st.session_state.participants[j]
                         sim = similarity(p1, p2)
                         if sim >= sim_threshold:
-                            st.markdown(f"**{p1['name']} ↔ {p2['name']}** — {sim:.0%}")
+                            st.markdown(f"**{p1['name']} ↔ {p2['name']}** ({sim:.0%} match)")
+
+                            shared_hobbies = set(p1['hobbies']) & set(p2['hobbies'])
+                            same_music = p1['music'] == p2['music']
+                            shared_tags = set(p1['image_tags']) & set(p2['image_tags'])
+                            shared_ai = set(p1.get('ai_themes', [])) & set(p2.get('ai_themes', []))
+
+                            # Pictures feel similar percent (if embeddings available)
+                            embedding1 = p1.get('ai_embedding', [])
+                            embedding2 = p2.get('ai_embedding', [])
+                            semantic_sim = cosine_similarity(embedding1, embedding2) if embedding1 and embedding2 else 0
+
+                            reasons = []
+                            if shared_hobbies:
+                                reasons.append(f"🎨 Hobbies you both like: {', '.join(shared_hobbies)}")
+                            if same_music:
+                                reasons.append(f"🎵 Both like {p1['music']} music")
+                            if shared_tags:
+                                reasons.append(f"🏷️ Similar tags: {', '.join(shared_tags)}")
+                            if shared_ai:
+                                reasons.append(f"🤖 Image keywords in common: {', '.join(sorted(shared_ai))}")
+                            if semantic_sim > 0.7:
+                                reasons.append(f"✨ Pictures feel similar: {semantic_sim:.0%}")
+
+                            if reasons:
+                                for reason in reasons:
+                                    st.caption(f"  • {reason}")
+                            st.markdown("---")
         
         if not st.session_state.participants:
             st.caption("No participants yet")
