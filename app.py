@@ -827,56 +827,16 @@ def build_graph(participants: List[Dict[str, Any]], threshold: float = 0.35):
                   label=p["name"], 
                   title=tooltip)
     
-    # Helper to provide a teaching-friendly breakdown for the edge tooltip
-    def _similarity_breakdown(p1: Dict[str, Any], p2: Dict[str, Any]):
-        # Duplicate the scoring from similarity() but expose the components
-        w_hobby, w_music, w_tags, w_ai, w_free = 0.3, 0.15, 0.15, 0.3, 0.1
-
-        s_hobby = jaccard(set(p1["hobbies"]), set(p2["hobbies"]))
-        s_music = 1.0 if p1["music"] and p1["music"] == p2["music"] else 0.0
-        s_tags  = jaccard(set(p1["image_tags"]), set(p2["image_tags"]))
-
-        emb1, emb2 = p1.get("ai_embedding", []), p2.get("ai_embedding", [])
-        if emb1 and emb2:
-            s_ai = cosine_similarity(emb1, emb2)
-        else:
-            s_ai = jaccard(set(p1.get("ai_themes", [])), set(p2.get("ai_themes", []))) if p1.get("ai_themes") and p2.get("ai_themes") else 0.0
-
-        ff1, ff2 = p1.get("fun_fact_embedding", []), p2.get("fun_fact_embedding", [])
-        if ff1 and ff2:
-            s_free = cosine_similarity(ff1, ff2)
-        else:
-            s_free = jaccard(set(p1["fun_fact"].lower().split()), set(p2["fun_fact"].lower().split()))
-
-        total = w_hobby*s_hobby + w_music*s_music + w_tags*s_tags + w_ai*s_ai + w_free*s_free
-        return {
-            "hobbies": s_hobby,
-            "music": s_music,
-            "tags": s_tags,
-            "images_semantic": s_ai,
-            "fun_fact": s_free,
-            "total": total,
-        }
-
     for i in range(len(participants)):
         for j in range(i+1, len(participants)):
-            comp = _similarity_breakdown(participants[i], participants[j])
-            s = comp["total"]
+            s = similarity(participants[i], participants[j])
             if s >= threshold:
-                # Edge weight controls thickness in PyVis
-                edge_title = (
-                    f"Total: {s:.0%}\n"
-                    f"• Hobbies (30%): {comp['hobbies']:.0%}\n"
-                    f"• Images semantic (30%): {comp['images_semantic']:.0%}\n"
-                    f"• Music (15%): {comp['music']:.0%}\n"
-                    f"• Tags (15%): {comp['tags']:.0%}\n"
-                    f"• Fun fact (10%): {comp['fun_fact']:.0%}"
-                )
+                # Edge weight controls thickness in PyVis; keep tooltip simple for students
                 G.add_edge(
                     participants[i]["id"],
                     participants[j]["id"],
                     weight=1 + 5*s,
-                    title=edge_title,
+                    title=f"Match: {s:.0%}",
                 )
     return G
 
@@ -1223,8 +1183,19 @@ elif st.session_state.current_step == 3:
     # Controls
     col1, col2, col3 = st.columns(3)
     with col1:
-        sim_threshold = st.slider("Connection Threshold", 0.0, 1.0, 0.20, 0.05,
-                                  help="LOWER = more connections. Default 0.20 works well for most groups!")
+        sim_threshold = st.slider(
+            "Connection Threshold",
+            0.0,
+            1.0,
+            0.20,
+            0.05,
+            help=(
+                "Only draw a line when two students' total match is at least this number. "
+                "The total mix is: hobbies (30%), images (30%), music (15%), tags (15%), fun fact (10%). "
+                "Move left to see more lines; move right to show only strong matches. Try 0.20–0.30."
+            ),
+        )
+        st.caption(f"Lines show when total match ≥ {sim_threshold:.0%}")
     with col2:
         if st.button("🔄 Refresh Network"):
             pass
@@ -1331,30 +1302,31 @@ elif st.session_state.current_step == 3:
     
     with col1:
         st.subheader("Connection Network")
-        
+        # Tiny legend that doesn't overwhelm students
+        st.caption("Tip: Thicker line = stronger match. Hover a line to see the match %.")
+
         # Add helpful explanation
-        with st.expander("🔍 How to Read This Graph", expanded=True):
-                        st.markdown("""
-                        ### What you're looking at
-                        - **Circles (nodes)** = each student
-                        - **Lines (edges)** = pairs of students whose similarity ≥ threshold
-                        - **Thicker lines** = higher overall similarity
-                        - Positions are for readability (physics) — they don't encode score
+        with st.expander("🔍 How to Read This Graph", expanded=False):
+            st.markdown("""
+            ### What you're looking at
+            - Circles = each student
+            - Lines = connections when two students have enough in common (above the slider)
+            - Thicker lines = stronger overall match
+            - Positions just help you see the lines — they don't change the score
 
-                        ### Why does it sometimes say 6/6 connections with only 4 students?
-                        With 4 students there are $\\binom{4}{2} = 6$ possible pairs. The metric shows
-                        **edges (pairs above threshold) / all possible pairs**. So "6/6" means every
-                        pair has enough in common to connect (a fully connected graph).
+            ### Why does it sometimes say 6/6 with only 4 students?
+            With 4 students there are 6 possible pairs. The number shows
+            connections made / all possible pairs. So "6/6" means everyone connects with everyone.
 
-                        ### What creates connections (weighted formula)
-                        - 🎨 Shared **hobbies** (30%) — Jaccard overlap of hobby sets
-                        - 🤖 **Image semantics** (30%) — cosine similarity of AI embeddings (or keyword overlap if no embedding)
-                        - 🎵 Same **music** (15%) — exact match
-                        - 🏷️ **Tags** you typed (15%) — Jaccard overlap
-                        - 💬 **Fun fact** (10%) — cosine similarity of embeddings (or word overlap)
+            ### What makes a connection
+            - Hobbies you share (counts most)
+            - What your images are about (if AI is on)
+            - Same music choice
+            - Tags you typed
+            - Your fun facts
 
-                        Hover any line to see a breakdown of each component for that pair.
-                        """)
+            Tip: Hover a line to see the match percent for that pair.
+            """)
         
         if len(st.session_state.participants) < 2:
             st.info("Waiting for more participants to join to show connections...")
@@ -1392,7 +1364,7 @@ elif st.session_state.current_step == 3:
             with col_a:
                 st.metric("👥 Students", len(st.session_state.participants))
             with col_b:
-                st.metric("🔗 Edges (pairs)", f"{total_connections}/{total_possible}")
+                st.metric("🔗 Connections", f"{total_connections}/{total_possible}")
             with col_c:
                 if strongest_edge:
                     st.metric("💪 Strongest Match", f"{max_similarity:.0%}")
@@ -1403,49 +1375,16 @@ elif st.session_state.current_step == 3:
     with col2:
         st.subheader(f"Participants ({len(st.session_state.participants)})")
         
-        # Add connection breakdown section
+        # Connections list (simple)
         if len(st.session_state.participants) >= 2:
-            with st.expander("🔗 Connection Details", expanded=False):
-                st.markdown("### Why Are People Connected?")
+            with st.expander("🔗 Connections", expanded=False):
                 for i in range(len(st.session_state.participants)):
                     for j in range(i+1, len(st.session_state.participants)):
                         p1 = st.session_state.participants[i]
                         p2 = st.session_state.participants[j]
                         sim = similarity(p1, p2)
-                        
                         if sim >= sim_threshold:
-                            st.markdown(f"**{p1['name']} ↔ {p2['name']}** ({sim:.0%} match)")
-                            
-                            # Calculate individual components
-                            shared_hobbies = set(p1['hobbies']) & set(p2['hobbies'])
-                            same_music = p1['music'] == p2['music']
-                            shared_tags = set(p1['image_tags']) & set(p2['image_tags'])
-                            shared_ai = set(p1.get('ai_themes', [])) & set(p2.get('ai_themes', []))
-                            
-                            # Semantic similarity
-                            embedding1 = p1.get('ai_embedding', [])
-                            embedding2 = p2.get('ai_embedding', [])
-                            semantic_sim = cosine_similarity(embedding1, embedding2) if embedding1 and embedding2 else 0
-                            
-                            reasons = []
-                            if shared_hobbies:
-                                reasons.append(f"🎨 Hobbies: {', '.join(shared_hobbies)}")
-                            if same_music:
-                                reasons.append(f"🎵 Music: Both love {p1['music']}")
-                            if shared_tags:
-                                reasons.append(f"🏷️ Tags: {', '.join(shared_tags)}")
-                            if shared_ai:
-                                reasons.append(f"🤖 AI keywords: {', '.join(shared_ai)}")
-                            if semantic_sim > 0.7:
-                                reasons.append(f"✨ Semantic similarity: {semantic_sim:.0%}")
-                            
-                            if reasons:
-                                for reason in reasons:
-                                    st.caption(f"  • {reason}")
-                            else:
-                                st.caption("  • Similar fun facts or minor overlaps")
-                            
-                            st.markdown("---")
+                            st.markdown(f"**{p1['name']} ↔ {p2['name']}** — {sim:.0%}")
         
         if not st.session_state.participants:
             st.caption("No participants yet")
