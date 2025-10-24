@@ -1312,6 +1312,16 @@ elif st.session_state.current_step == 3:
     if len(st.session_state.participants) >= 2:
         with st.expander("🔍 Debug: See Actual Match Scores", expanded=False):
             st.caption("This shows why people are or aren't connected:")
+
+            # Inline filter for debugging panel
+            debug_name_query = st.text_input(
+                "Filter by name",
+                value=st.session_state.get("debug_name_query", ""),
+                key="debug_name_query",
+                placeholder="Type a name to filter the list",
+                help="Filters pairs where either student's name contains this text."
+            )
+            ql = debug_name_query.strip().lower()
             
             # Check embedding status
             embeddings_count = sum(1 for p in st.session_state.participants if p.get("ai_embedding"))
@@ -1324,6 +1334,9 @@ elif st.session_state.current_step == 3:
                 for j in range(i+1, len(st.session_state.participants)):
                     p1 = st.session_state.participants[i]
                     p2 = st.session_state.participants[j]
+                    # Apply name filter if present
+                    if ql and (ql not in p1['name'].lower() and ql not in p2['name'].lower()):
+                        continue
                     sim = similarity(p1, p2)
                     
                     # Debug: Show what data exists
@@ -1484,13 +1497,6 @@ elif st.session_state.current_step == 3:
             else:
                 names = sorted([p['name'] for p in st.session_state.participants])
                 focus = st.selectbox("Show connections for", ["Everyone"] + names, index=0)
-                name_query = st.text_input(
-                    "Filter by name",
-                    value=st.session_state.get("connections_name_query", ""),
-                    key="connections_name_query",
-                    placeholder="Type a name to filter the list",
-                    help="Filters pairs where either person's name contains this text."
-                )
 
                 # Build the list of current edges (pairs) that meet the threshold
                 pairs = []
@@ -1506,35 +1512,13 @@ elif st.session_state.current_step == 3:
                 if focus != "Everyone":
                     pairs = [e for e in pairs if e["p1"]["name"] == focus or e["p2"]["name"] == focus]
 
-                # Optional free-text name filter
-                if name_query.strip():
-                    q = name_query.strip().lower()
-                    pairs = [
-                        e for e in pairs
-                        if q in e["p1"]["name"].lower() or q in e["p2"]["name"].lower()
-                    ]
+                # Note: free-text name filter moved to the Debug panel
 
                 # Sort by similarity, highest first
                 pairs.sort(key=lambda e: e["sim"], reverse=True)
 
-                # Limit control to avoid very long lists (no slider; neutral controls)
-                max_show = len(pairs) if pairs else 0
-                if max_show > 0:
-                    col_limit1, col_limit2 = st.columns([1,1])
-                    with col_limit1:
-                        show_all = st.checkbox("Show all", value=False, key="connections_show_all")
-                    with col_limit2:
-                        top_n = st.number_input(
-                            "How many to show",
-                            min_value=1,
-                            max_value=max_show,
-                            value=min(10, max_show),
-                            step=1,
-                            key="connections_top_n"
-                        )
-                    if not show_all:
-                        pairs = pairs[: int(top_n)]
-                else:
+                # No length limit controls (show all that match). Show note if empty.
+                if not pairs:
                     st.caption("No connections at this threshold")
 
                 # Display the pairs with kid‑friendly reasons
