@@ -20,6 +20,7 @@ import hashlib
 
 # --- Credentials file (persistent for the app run) ---
 CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), "credentials.json")
+PARTICIPANTS_PATH = os.path.join(os.path.dirname(__file__), "participants.json")
 
 def load_credentials() -> Dict[str, Any]:
     # Read file-backed data (used-state, fallback credentials)
@@ -143,6 +144,31 @@ def save_credentials(creds: Dict[str, Any]):
         json.dump(creds, f, indent=2)
 
 
+def load_participants() -> List[Dict[str, Any]]:
+    """Load persisted participants from disk. Returns empty list when missing/invalid."""
+    try:
+        if os.path.exists(PARTICIPANTS_PATH):
+            with open(PARTICIPANTS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+    except Exception:
+        logger.exception("Failed to load participants from disk")
+    return []
+
+
+def save_participants(participants: List[Dict[str, Any]]):
+    """Persist participants to disk atomically."""
+    try:
+        tmp = PARTICIPANTS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(participants, f, indent=2)
+        # atomic replace
+        os.replace(tmp, PARTICIPANTS_PATH)
+    except Exception:
+        logger.exception("Failed to save participants to disk")
+
+
 def _hash_pw(pw: str) -> str:
     return hashlib.sha256(pw.encode("utf-8")).hexdigest()
 
@@ -174,25 +200,8 @@ def mark_student_used(token: str):
         logger.exception("Failed to persist used student credential hash")
 
 
-def safe_rerun():
-    """Attempt to trigger a rerun in a Streamlit-compatible way without raising if the API isn't present."""
-    try:
-        if hasattr(st, "experimental_rerun"):
-            st.experimental_rerun()
-            return
-    except Exception:
-        pass
-    try:
-        if hasattr(st, "rerun"):
-            st.rerun()
-            return
-    except Exception:
-        pass
-    # Fall back to stopping the script; the app will refresh on next user interaction.
-    try:
-        st.stop()
-    except Exception:
-        return
+# Removed automatic rerun logic per user request. The app will not attempt to programmatically
+# trigger reruns; the user will refresh or restart the app manually when needed.
 
 def generate_password(length: int = 8) -> str:
     alphabet = string.ascii_letters + string.digits
@@ -299,14 +308,12 @@ if not st.session_state.authenticated:
                     st.session_state.is_admin = True
                     st.session_state.admin_username = username
                     st.success("Logged in as admin")
-                    safe_rerun()
             else:
                 # Legacy admin: password-only (no username required)
                 if pw and admin_pw and pw == admin_pw:
                     st.session_state.authenticated = True
                     st.session_state.is_admin = True
                     st.success("Logged in as admin")
-                    safe_rerun()
 
             # Student login
             matched = None
@@ -349,7 +356,6 @@ if not st.session_state.authenticated:
                     st.session_state.student_pw = matched.get("pw")
                     st.session_state.student_username = matched.get("username") if matched.get("username") else None
                     st.success("Logged in as student")
-                    safe_rerun()
 
     # Stop further rendering until logged in
     st.stop()
@@ -361,9 +367,10 @@ def log(message: str, level: str = "INFO"):
     st.session_state.logs.append(log_entry)
     logger.info(log_entry)
 
-# ---------- Simple in-memory "DB" ----------
+# ---------- Participants (shared across sessions) ----------
+# Load persisted participants from disk so different users see the same network
 if "participants" not in st.session_state:
-    st.session_state.participants = []
+    st.session_state.participants = load_participants()
 
 # Initialize user session state
 if "current_step" not in st.session_state:
@@ -740,7 +747,6 @@ with st.sidebar:
     st.subheader("📋 Activity Logs")
     if st.button("Clear Logs"):
         st.session_state.logs = []
-        st.rerun()
     
     if st.session_state.logs:
         log_container = st.container(height=400)
@@ -820,7 +826,6 @@ if st.session_state.current_step == 1:
                     "fun_fact": fun_fact.strip()
                 }
                 st.session_state.current_step = 2
-                st.rerun()
 
 # STEP 2: Images and Tags
 elif st.session_state.current_step == 2:
@@ -851,7 +856,7 @@ elif st.session_state.current_step == 2:
     with col1:
         if st.button("← Back to Step 1"):
             st.session_state.current_step = 1
-            st.rerun()
+            pass
     
     with col2:
         if st.button("Add to Network →"):
@@ -927,8 +932,13 @@ elif st.session_state.current_step == 2:
             st.session_state.user_completed = True
             st.session_state.current_step = 3
             log(f"Total participants now: {len(st.session_state.participants)}")
+            # Persist participants so other users/sessions see them
+            try:
+                save_participants(st.session_state.participants)
+            except Exception:
+                logger.exception("Failed to persist participants after adding")
+
             st.success(f"Welcome to the network, {st.session_state.user_profile['name']}! 🎉")
-            st.rerun()
 
 # STEP 3: View Network
 elif st.session_state.current_step == 3:
@@ -945,7 +955,7 @@ elif st.session_state.current_step == 3:
                                   help="LOWER = more connections. Default 0.20 works well for most groups!")
     with col2:
         if st.button("🔄 Refresh Network"):
-            st.rerun()
+            pass
     with col3:
         # Only admin can add arbitrary extra users; students can only add themselves once
         if st.session_state.is_admin:
@@ -953,7 +963,6 @@ elif st.session_state.current_step == 3:
                 st.session_state.current_step = 1
                 st.session_state.user_profile = {}
                 st.session_state.user_completed = False
-                st.rerun()
         else:
             st.caption("Student accounts: you can add your profile only once. Ask the admin to add more participants.")
     
@@ -1029,11 +1038,12 @@ elif st.session_state.current_step == 3:
                 st.warning("⚠️ Existing participants don't have semantic embeddings. Clear data and re-add them to enable semantic matching!")
 
             if st.button("🗑️ Clear All Data"):
-                st.session_state.participants = []
-                st.session_state.current_step = 1
-                st.session_state.user_profile = {}
-                st.session_state.user_completed = False
-                st.rerun()
+                        # Clear in-memory and persisted participants
+                        st.session_state.participants = []
+                        save_participants([])
+                        st.session_state.current_step = 1
+                        st.session_state.user_profile = {}
+                        st.session_state.user_completed = False
     
     # Network visualization and participant list
     col1, col2 = st.columns([2,1])
