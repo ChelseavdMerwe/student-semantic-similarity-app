@@ -827,14 +827,57 @@ def build_graph(participants: List[Dict[str, Any]], threshold: float = 0.35):
                   label=p["name"], 
                   title=tooltip)
     
+    # Helper to provide a teaching-friendly breakdown for the edge tooltip
+    def _similarity_breakdown(p1: Dict[str, Any], p2: Dict[str, Any]):
+        # Duplicate the scoring from similarity() but expose the components
+        w_hobby, w_music, w_tags, w_ai, w_free = 0.3, 0.15, 0.15, 0.3, 0.1
+
+        s_hobby = jaccard(set(p1["hobbies"]), set(p2["hobbies"]))
+        s_music = 1.0 if p1["music"] and p1["music"] == p2["music"] else 0.0
+        s_tags  = jaccard(set(p1["image_tags"]), set(p2["image_tags"]))
+
+        emb1, emb2 = p1.get("ai_embedding", []), p2.get("ai_embedding", [])
+        if emb1 and emb2:
+            s_ai = cosine_similarity(emb1, emb2)
+        else:
+            s_ai = jaccard(set(p1.get("ai_themes", [])), set(p2.get("ai_themes", []))) if p1.get("ai_themes") and p2.get("ai_themes") else 0.0
+
+        ff1, ff2 = p1.get("fun_fact_embedding", []), p2.get("fun_fact_embedding", [])
+        if ff1 and ff2:
+            s_free = cosine_similarity(ff1, ff2)
+        else:
+            s_free = jaccard(set(p1["fun_fact"].lower().split()), set(p2["fun_fact"].lower().split()))
+
+        total = w_hobby*s_hobby + w_music*s_music + w_tags*s_tags + w_ai*s_ai + w_free*s_free
+        return {
+            "hobbies": s_hobby,
+            "music": s_music,
+            "tags": s_tags,
+            "images_semantic": s_ai,
+            "fun_fact": s_free,
+            "total": total,
+        }
+
     for i in range(len(participants)):
         for j in range(i+1, len(participants)):
-            s = similarity(participants[i], participants[j])
+            comp = _similarity_breakdown(participants[i], participants[j])
+            s = comp["total"]
             if s >= threshold:
                 # Edge weight controls thickness in PyVis
-                G.add_edge(participants[i]["id"], participants[j]["id"], 
-                          weight=1 + 5*s, 
-                          title=f"Match: {s:.0%}")
+                edge_title = (
+                    f"Total: {s:.0%}\n"
+                    f"• Hobbies (30%): {comp['hobbies']:.0%}\n"
+                    f"• Images semantic (30%): {comp['images_semantic']:.0%}\n"
+                    f"• Music (15%): {comp['music']:.0%}\n"
+                    f"• Tags (15%): {comp['tags']:.0%}\n"
+                    f"• Fun fact (10%): {comp['fun_fact']:.0%}"
+                )
+                G.add_edge(
+                    participants[i]["id"],
+                    participants[j]["id"],
+                    weight=1 + 5*s,
+                    title=edge_title,
+                )
     return G
 
 def render_pyvis(G: nx.Graph, height: str = "650px"):
@@ -1291,23 +1334,27 @@ elif st.session_state.current_step == 3:
         
         # Add helpful explanation
         with st.expander("🔍 How to Read This Graph", expanded=True):
-            st.markdown("""
-            ### What you're looking at:
-            - **Circles (nodes)** = Each person
-            - **Lines (edges)** = Potential friendships/connections
-            - **Thicker lines** = Stronger connections (more in common)
-            - **No line** = Not enough in common (below threshold)
-            
-            ### What creates connections?
-            - 🎨 Shared **hobbies** (30%)
-            - 🤖 **AI semantic similarity** in your images (30%) 
-              - ✨ Smart matching understands related concepts (e.g., "plant" ≈ "tree")
-            - 🎵 Same **music** taste (15%)
-            - 🏷️ Similar **tags** you wrote (15%)
-            - 💬 **Fun fact** word overlap (10%)
-            
-            **💡 Try:** Hover over the circles and lines to see details!
-            """)
+                        st.markdown("""
+                        ### What you're looking at
+                        - **Circles (nodes)** = each student
+                        - **Lines (edges)** = pairs of students whose similarity ≥ threshold
+                        - **Thicker lines** = higher overall similarity
+                        - Positions are for readability (physics) — they don't encode score
+
+                        ### Why does it sometimes say 6/6 connections with only 4 students?
+                        With 4 students there are $\\binom{4}{2} = 6$ possible pairs. The metric shows
+                        **edges (pairs above threshold) / all possible pairs**. So "6/6" means every
+                        pair has enough in common to connect (a fully connected graph).
+
+                        ### What creates connections (weighted formula)
+                        - 🎨 Shared **hobbies** (30%) — Jaccard overlap of hobby sets
+                        - 🤖 **Image semantics** (30%) — cosine similarity of AI embeddings (or keyword overlap if no embedding)
+                        - 🎵 Same **music** (15%) — exact match
+                        - 🏷️ **Tags** you typed (15%) — Jaccard overlap
+                        - 💬 **Fun fact** (10%) — cosine similarity of embeddings (or word overlap)
+
+                        Hover any line to see a breakdown of each component for that pair.
+                        """)
         
         if len(st.session_state.participants) < 2:
             st.info("Waiting for more participants to join to show connections...")
@@ -1345,7 +1392,7 @@ elif st.session_state.current_step == 3:
             with col_a:
                 st.metric("👥 Students", len(st.session_state.participants))
             with col_b:
-                st.metric("🔗 Connections", f"{total_connections}/{total_possible}")
+                st.metric("🔗 Edges (pairs)", f"{total_connections}/{total_possible}")
             with col_c:
                 if strongest_edge:
                     st.metric("💪 Strongest Match", f"{max_similarity:.0%}")
