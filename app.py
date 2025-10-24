@@ -21,6 +21,7 @@ import hashlib
 # --- Credentials file (persistent for the app run) ---
 CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), "credentials.json")
 PARTICIPANTS_PATH = os.path.join(os.path.dirname(__file__), "participants.json")
+SESSIONS_PATH = os.path.join(os.path.dirname(__file__), "sessions.json")
 
 def load_credentials() -> Dict[str, Any]:
     # Read file-backed data (used-state, fallback credentials)
@@ -127,6 +128,25 @@ def load_credentials() -> Dict[str, Any]:
     else:
         # fallback to file-backed student list (legacy)
         students = file_creds.get("students", [])
+        # Recompute 'used' flags based on stored hashes to avoid stale state
+        if isinstance(students, list):
+            recomputed = []
+            for s in students:
+                try:
+                    if not isinstance(s, dict):
+                        continue
+                    username = s.get("username")
+                    pw = s.get("pw", "")
+                    token = f"{username}:{pw}" if username else pw
+                    h = hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+                    s["used"] = h in used_hashes
+                    # Ensure expected fields exist
+                    if "assigned_to" not in s:
+                        s["assigned_to"] = None
+                    recomputed.append(s)
+                except Exception:
+                    recomputed.append(s)
+            students = recomputed
 
     # Admin: return both single password and admin_map (if present)
     if admin_pw is None:
@@ -145,12 +165,49 @@ def save_credentials(creds: Dict[str, Any]):
 
 
 def load_participants() -> List[Dict[str, Any]]:
-    """Load persisted participants from disk. Returns empty list when missing/invalid."""
+    """Load persisted participants from disk. Decodes any base64-encoded image data.
+
+    Returns empty list when missing/invalid.
+    """
     try:
         if os.path.exists(PARTICIPANTS_PATH):
             with open(PARTICIPANTS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
+                    # Decode any base64 image payloads back into bytes for in-memory use
+                    for p in data:
+                        try:
+                            # New format: images -> [{ name, data_b64, ai }]
+                            if isinstance(p, dict) and isinstance(p.get("images"), list):
+                                decoded_images = []
+                                for img in p["images"]:
+                                    if not isinstance(img, dict):
+                                        continue
+                                    name = img.get("name")
+                                    ai = img.get("ai")
+                                    data_b64 = img.get("data_b64")
+                                    payload = None
+                                    if isinstance(data_b64, str):
+                                        try:
+                                            payload = base64.b64decode(data_b64)
+                                        except Exception:
+                                            payload = None
+                                    decoded_images.append({
+                                        "name": name,
+                                        "data": payload,
+                                        "ai": ai or {"themes": [], "description": "", "embedding": []}
+                                    })
+                                p["images"] = decoded_images
+
+                            # Back-compat: single image_data_b64 field
+                            if "image_data_b64" in p and isinstance(p.get("image_data_b64"), str):
+                                try:
+                                    p["image_data"] = base64.b64decode(p["image_data_b64"])
+                                except Exception:
+                                    p["image_data"] = None
+                        except Exception:
+                            # Keep participant entry even if one image fails to decode
+                            logger.exception("Failed to decode participant image data")
                     return data
     except Exception:
         logger.exception("Failed to load participants from disk")
@@ -158,15 +215,122 @@ def load_participants() -> List[Dict[str, Any]]:
 
 
 def save_participants(participants: List[Dict[str, Any]]):
-    """Persist participants to disk atomically."""
+    """Persist participants to disk atomically.
+
+    Ensures JSON-serializability by base64-encoding any image bytes.
+    """
     try:
+        # Build a JSON-safe copy
+        safe_list: List[Dict[str, Any]] = []
+        for p in participants:
+            try:
+                if not isinstance(p, dict):
+                    continue
+                q = {k: v for k, v in p.items() if k not in ("images", "image_data")}
+
+                # Handle images list
+                if isinstance(p.get("images"), list):
+                    safe_images = []
+                    for img in p["images"]:
+                        if not isinstance(img, dict):
+                            continue
+                        name = img.get("name")
+                        ai = img.get("ai")
+                        data_bytes = img.get("data")
+                        data_b64 = None
+                        if isinstance(data_bytes, (bytes, bytearray)):
+                            try:
+                                data_b64 = base64.b64encode(bytes(data_bytes)).decode("utf-8")
+                            except Exception:
+                                data_b64 = None
+                        safe_images.append({
+                            "name": name,
+                            "data_b64": data_b64,
+                            "ai": ai or {"themes": [], "description": "", "embedding": []}
+                        })
+                    q["images"] = safe_images
+
+                # Back-compat: single image_data -> image_data_b64
+                if isinstance(p.get("image_data"), (bytes, bytearray)):
+                    try:
+                        q["image_data_b64"] = base64.b64encode(bytes(p["image_data"])).decode("utf-8")
+                    except Exception:
+                        q["image_data_b64"] = None
+
+                safe_list.append(q)
+            except Exception:
+                logger.exception("Failed to serialize a participant; skipping entry")
+
         tmp = PARTICIPANTS_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(participants, f, indent=2)
+            json.dump(safe_list, f, indent=2)
         # atomic replace
         os.replace(tmp, PARTICIPANTS_PATH)
     except Exception:
         logger.exception("Failed to save participants to disk")
+
+
+def load_sessions() -> Dict[str, Any]:
+    """Load sessions mapping (sid -> session data). Returns empty dict if missing/invalid."""
+    try:
+        if os.path.exists(SESSIONS_PATH):
+            with open(SESSIONS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        logger.exception("Failed to load sessions from disk")
+    return {}
+
+
+def save_sessions(sessions: Dict[str, Any]):
+    """Persist sessions mapping atomically."""
+    try:
+        tmp = SESSIONS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sessions, f, indent=2)
+        os.replace(tmp, SESSIONS_PATH)
+    except Exception:
+        logger.exception("Failed to save sessions to disk")
+
+
+def save_current_session(sid: str):
+    """Save minimal, non-sensitive parts of st.session_state under sid."""
+    if not sid:
+        return
+    sessions = load_sessions()
+    # Minimal session shape
+    sessions[sid] = {
+        "authenticated": bool(st.session_state.get("authenticated", False)),
+        "is_admin": bool(st.session_state.get("is_admin", False)),
+        "admin_username": st.session_state.get("admin_username"),
+        "student_username": st.session_state.get("student_username"),
+        "current_step": int(st.session_state.get("current_step", 1)),
+        "user_profile": st.session_state.get("user_profile", {}),
+        "user_completed": bool(st.session_state.get("user_completed", False)),
+    }
+    save_sessions(sessions)
+
+
+def load_session_into_state(sid: str):
+    """Load a saved session (if present) into st.session_state. Returns True when loaded."""
+    if not sid:
+        return False
+    sessions = load_sessions()
+    data = sessions.get(sid)
+    if not data:
+        return False
+    # Populate safe fields
+    st.session_state.authenticated = bool(data.get("authenticated", False))
+    st.session_state.is_admin = bool(data.get("is_admin", False))
+    if data.get("admin_username"):
+        st.session_state.admin_username = data.get("admin_username")
+    if data.get("student_username"):
+        st.session_state.student_username = data.get("student_username")
+    st.session_state.current_step = int(data.get("current_step", 1))
+    st.session_state.user_profile = data.get("user_profile", {})
+    st.session_state.user_completed = bool(data.get("user_completed", False))
+    return True
 
 
 def _hash_pw(pw: str) -> str:
@@ -251,6 +415,37 @@ st.set_page_config(page_title="Who Might Get Along?", page_icon="🕸️", layou
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Session handling (query params + server-side sessions) ---
+# Generate or retrieve a stable sid via query parameters (no custom JS required).
+sid = None
+try:
+    params = st.experimental_get_query_params()
+    sid = params.get("sid", [None])[0]
+except Exception:
+    sid = None
+
+if not sid:
+    # Create a new sid and set it in the URL so it survives refreshes
+    sid = str(uuid.uuid4())
+    try:
+        st.experimental_set_query_params(sid=sid)
+    except Exception:
+        pass
+
+# If we have a sid, attempt to rehydrate minimal session state (non-sensitive)
+if sid:
+        try:
+                loaded = load_session_into_state(sid)
+                if loaded:
+                        logger.info(f"Session {sid} rehydrated into st.session_state")
+                else:
+                        try:
+                                st.info("Found a local session token but no saved session data yet. Your next actions will be saved for future refreshes.")
+                        except Exception:
+                                pass
+        except Exception:
+                logger.exception("Failed to load session into state")
+
 # Initialize logs in session state
 if "logs" not in st.session_state:
     st.session_state.logs = []
@@ -308,12 +503,20 @@ if not st.session_state.authenticated:
                     st.session_state.is_admin = True
                     st.session_state.admin_username = username
                     st.success("Logged in as admin")
+                    try:
+                        save_current_session(sid)
+                    except Exception:
+                        logger.exception("Failed to save session after admin login")
             else:
                 # Legacy admin: password-only (no username required)
                 if pw and admin_pw and pw == admin_pw:
                     st.session_state.authenticated = True
                     st.session_state.is_admin = True
                     st.success("Logged in as admin")
+                    try:
+                        save_current_session(sid)
+                    except Exception:
+                        logger.exception("Failed to save session after admin login")
 
             # Student login
             matched = None
@@ -356,6 +559,10 @@ if not st.session_state.authenticated:
                     st.session_state.student_pw = matched.get("pw")
                     st.session_state.student_username = matched.get("username") if matched.get("username") else None
                     st.success("Logged in as student")
+                    try:
+                        save_current_session(sid)
+                    except Exception:
+                        logger.exception("Failed to save session after student login")
 
     # Stop further rendering until logged in
     st.stop()
@@ -826,7 +1033,10 @@ if st.session_state.current_step == 1:
                     "fun_fact": fun_fact.strip()
                 }
                 st.session_state.current_step = 2
-
+                try:
+                    save_current_session(sid)
+                except Exception:
+                    logger.exception("Failed to save session after moving to step 2")
 # STEP 2: Images and Tags
 elif st.session_state.current_step == 2:
     st.subheader("Step 2: Show us your personality!")
@@ -938,6 +1148,12 @@ elif st.session_state.current_step == 2:
             except Exception:
                 logger.exception("Failed to persist participants after adding")
 
+            # Save the user's session state (so refresh preserves their place)
+            try:
+                save_current_session(sid)
+            except Exception:
+                logger.exception("Failed to save session after adding participant")
+
             st.success(f"Welcome to the network, {st.session_state.user_profile['name']}! 🎉")
 
 # STEP 3: View Network
@@ -1044,6 +1260,15 @@ elif st.session_state.current_step == 3:
                         st.session_state.current_step = 1
                         st.session_state.user_profile = {}
                         st.session_state.user_completed = False
+                        # Remove saved session for current sid as well
+                        try:
+                            if sid:
+                                sessions = load_sessions()
+                                if sid in sessions:
+                                    sessions.pop(sid, None)
+                                    save_sessions(sessions)
+                        except Exception:
+                            logger.exception("Failed to clear saved session for sid")
     
     # Network visualization and participant list
     col1, col2 = st.columns([2,1])
